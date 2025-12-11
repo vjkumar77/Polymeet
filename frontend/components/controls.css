@@ -1,0 +1,39 @@
+.controls-bar {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 22px;
+  padding: 16px 24px;
+  background: rgba(0,0,0,0.35);
+  backdrop-filter: blur(15px);
+  border-radius: 50px;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.35);
+}
+
+.ctrl-btn {
+  width: 54px;
+  height: 54px;
+  font-size: 24px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  color: white;
+  transition: 0.15s;
+}
+
+.ctrl-btn.on {
+  background: #2ecc71;
+}
+.ctrl-btn.off {
+  background: #e74c3c;
+}
+
+.ctrl-btn.leave {
+  background: #ff3333;
+}
+
+.ctrl-btn:hover {
+  transform: scale(1.1);
+}
