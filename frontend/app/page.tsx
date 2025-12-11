@@ -1,19 +1,18 @@
-"use client";  // MUST BE FIRST LINE
+"use client";
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-
 import Hero from "@/components/Hero";
 import Features from "@/components/Features";
 import Steps from "@/components/Steps";
 import Footer from "@/components/Footer";
-
-import "@/app/styles/home.css";
+import "./styles/home.css";  // path MUST be correct
 
 export default function HomePage() {
   const router = useRouter();
   const [joinId, setJoinId] = useState("");
 
+  // Start meeting = Create random ID + push
   const startMeeting = () => {
     const roomId =
       typeof crypto !== "undefined" && crypto.randomUUID
@@ -23,9 +22,10 @@ export default function HomePage() {
     router.push(`/room/${roomId}`);
   };
 
+  // Join existing meeting
   const joinMeeting = () => {
     if (!joinId.trim()) {
-      alert("Enter meeting id");
+      alert("Enter a meeting ID");
       return;
     }
     router.push(`/room/${joinId.trim()}`);
@@ -42,13 +42,13 @@ export default function HomePage() {
 
         <div className="join-box">
           <input
-            placeholder="Enter meeting id"
             value={joinId}
             onChange={(e) => setJoinId(e.target.value)}
+            placeholder="Enter meeting ID"
             className="join-input"
           />
           <button className="btn" onClick={joinMeeting}>
-            Join Meeting
+            Join
           </button>
         </div>
       </div>
