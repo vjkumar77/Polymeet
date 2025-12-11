@@ -5,7 +5,7 @@ import "./room.css";
 import { useEffect, useRef, useState, useCallback } from "react";
 import VideoGrid from "@/components/VideoGrid";
 import Controls from "@/components/Controls";
-import { initSocket, disconnectSocket, getSocket } from "@/lib/socket";
+import { initSocket, disconnectSocket } from "@/lib/socket";
 
 import {
   initLocalStream,
@@ -18,12 +18,15 @@ import {
 } from "@/lib/webrtc";
 
 export default function RoomClient({ roomId }) {
+  // ⭐ VALIDATE ROOMID IMMEDIATELY
+  console.log("[RoomClient] Mounted with roomId:", roomId);
+
   const socketRef = useRef(null);
   const isHostRef = useRef(false);
   const offersRef = useRef({});
   const joinedRef = useRef(false);
-  const mountedRef = useRef(true);              // ⭐ Track if component is mounted
-  const joinRequestSentRef = useRef(false);     // ⭐ Prevent duplicate joins
+  const mountedRef = useRef(true);
+  const joinRequestSentRef = useRef(false);
 
   const [localSocketId, setLocalSocketId] = useState(null);
   const [localStream, setLocalStream] = useState(null);
@@ -36,13 +39,18 @@ export default function RoomClient({ roomId }) {
   const [waiting, setWaiting] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState("connecting");
 
-  const [username] = useState(() => `User-${Math.floor(Math.random() * 10000)}`);
+  // ⭐ Generate username once on mount
+  const [username] = useState(() => {
+    const name = `User-${Math.floor(Math.random() * 10000)}`;
+    console.log("[RoomClient] Generated username:", name);
+    return name;
+  });
 
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // ⭐ Create offer helper
+  // Create offer helper
   const awaitCreateOffer = useCallback(async (peerId, socket) => {
     try {
       createPeerConnection({
@@ -64,17 +72,17 @@ export default function RoomClient({ roomId }) {
     }
   }, []);
 
-  // ⭐ Initialize local stream FIRST
+  // ⭐ Initialize local stream
   useEffect(() => {
     mountedRef.current = true;
-    
+
     const initMedia = async () => {
       try {
         console.log("[MEDIA] Requesting camera/mic...");
         const stream = await initLocalStream();
-        
+
         if (!mountedRef.current) return;
-        
+
         console.log("[MEDIA] ✅ Got local stream");
         setLocalStream(stream);
         setMicOn(stream.getAudioTracks()[0]?.enabled ?? true);
@@ -92,16 +100,27 @@ export default function RoomClient({ roomId }) {
     };
   }, []);
 
-  // ⭐ SOCKET LOGIC - Only runs when localStream is ready
+  // ⭐ SOCKET LOGIC
   useEffect(() => {
+    // ⭐ CRITICAL: Validate all required data before proceeding
     if (!localStream) {
-      console.log("[SOCKET] Waiting for localStream...");
+      console.log("[SOCKET] ⏳ Waiting for localStream...");
       return;
     }
 
-    console.log("[SOCKET] LocalStream ready, initializing socket...");
-    
-    // Reset state for this room
+    if (!roomId) {
+      console.error("[SOCKET] ❌ roomId is undefined!");
+      return;
+    }
+
+    if (!username) {
+      console.error("[SOCKET] ❌ username is undefined!");
+      return;
+    }
+
+    console.log("[SOCKET] ✅ All data ready:", { roomId, username });
+
+    // Reset refs
     joinRequestSentRef.current = false;
     isHostRef.current = false;
     joinedRef.current = false;
@@ -109,45 +128,59 @@ export default function RoomClient({ roomId }) {
     const socket = initSocket();
     socketRef.current = socket;
 
-    // ⭐ Send join request
+    // ⭐ Send join request function
     const sendJoinRequest = () => {
       if (joinRequestSentRef.current) {
-        console.log("[SOCKET] Join request already sent, skipping");
+        console.log("[SOCKET] Join already sent, skipping");
         return;
       }
 
-      console.log("[SOCKET] 📤 Sending join-request:", { roomId, username, socketId: socket.id });
+      // ⭐ DOUBLE CHECK before sending
+      if (!roomId || !username) {
+        console.error("[SOCKET] ❌ Cannot send join-request, missing data:", { roomId, username });
+        return;
+      }
+
+      const payload = { roomId, username };
+      console.log("[SOCKET] 📤 Sending join-request:", JSON.stringify(payload));
+      
       joinRequestSentRef.current = true;
       setWaiting(true);
       setConnectionStatus("joining");
-      
-      socket.emit("join-request", { roomId, username });
+
+      socket.emit("join-request", payload);
     };
 
-    // ⭐ Handle connect
+    // Handle connect
     const handleConnect = () => {
       console.log("[SOCKET] ✅ Connected:", socket.id);
       if (mountedRef.current) {
         setLocalSocketId(socket.id);
         setConnectionStatus("connected");
       }
-      sendJoinRequest();
+      
+      // ⭐ Small delay to ensure socket is fully ready
+      setTimeout(() => {
+        sendJoinRequest();
+      }, 100);
     };
 
-    // ⭐ If already connected, send join request immediately
+    // If already connected
     if (socket.connected) {
       console.log("[SOCKET] Already connected:", socket.id);
       setLocalSocketId(socket.id);
-      sendJoinRequest();
+      setTimeout(() => {
+        sendJoinRequest();
+      }, 100);
     }
 
     socket.on("connect", handleConnect);
 
-    // ⭐ YOU ARE HOST
+    // YOU ARE HOST
     socket.on("you-are-host", () => {
       console.log("[SOCKET] 👑 I am the HOST!");
       if (!mountedRef.current) return;
-      
+
       setIsHost(true);
       isHostRef.current = true;
       setIsAdmitted(true);
@@ -158,25 +191,25 @@ export default function RoomClient({ roomId }) {
 
     // Waiting for host
     socket.on("waiting-for-host", () => {
-      console.log("[SOCKET] ⏳ Waiting for host to admit...");
+      console.log("[SOCKET] ⏳ Waiting for host...");
       if (!mountedRef.current) return;
-      
+
       setWaiting(true);
       setIsAdmitted(false);
       setConnectionStatus("waiting");
     });
 
-    // Pending requests (host only)
+    // Pending requests
     socket.on("pending-requests", (list) => {
-      console.log("[SOCKET] 📋 Pending requests:", list?.length || 0);
+      console.log("[SOCKET] 📋 Pending:", list?.length || 0);
       if (mountedRef.current) {
         setPendingRequests(list || []);
       }
     });
 
-    // ⭐ ADMITTED
+    // ADMITTED
     socket.on("admitted", ({ users }) => {
-      console.log("[SOCKET] ✅ Admitted to room! Users:", users?.length);
+      console.log("[SOCKET] ✅ Admitted!");
       if (!mountedRef.current) return;
 
       setIsAdmitted(true);
@@ -188,7 +221,6 @@ export default function RoomClient({ roomId }) {
       const others = users.filter((u) => u.id !== myId);
       setParticipants(others);
 
-      // Create peer connections
       others.forEach((u) => {
         createPeerConnection({
           peerId: u.id,
@@ -201,13 +233,12 @@ export default function RoomClient({ roomId }) {
         });
       });
 
-      // Host sends offers
       if (isHostRef.current) {
         others.forEach((u) => awaitCreateOffer(u.id, socket));
       }
     });
 
-    // Room users update
+    // Room users
     socket.on("room-users", (users) => {
       console.log("[SOCKET] 👥 Room users:", users?.length);
       if (!mountedRef.current) return;
@@ -238,10 +269,8 @@ export default function RoomClient({ roomId }) {
 
     // User joined
     socket.on("user-joined", async ({ id, username: newName }) => {
-      console.log("[SOCKET] 🆕 User joined:", id, newName);
+      console.log("[SOCKET] 🆕 User joined:", id);
       if (!mountedRef.current) return;
-
-      const myId = socket.id;
 
       setParticipants((prev) => {
         if (prev.some((p) => p.id === id)) return prev;
@@ -258,19 +287,13 @@ export default function RoomClient({ roomId }) {
         },
       });
 
-      if (isHostRef.current) {
-        await awaitCreateOffer(id, socket);
-        return;
-      }
-
-      if (id !== myId && joinedRef.current) {
+      if (isHostRef.current || joinedRef.current) {
         await awaitCreateOffer(id, socket);
       }
     });
 
     // Signaling
     socket.on("offer", async ({ from, offer }) => {
-      console.log("[SOCKET] 📨 Received offer from:", from);
       await handleOfferFrom({
         fromId: from,
         offer,
@@ -284,7 +307,6 @@ export default function RoomClient({ roomId }) {
     });
 
     socket.on("answer", async ({ from, answer }) => {
-      console.log("[SOCKET] 📨 Received answer from:", from);
       await handleAnswerFrom({ fromId: from, answer });
       delete offersRef.current[from];
     });
@@ -309,7 +331,7 @@ export default function RoomClient({ roomId }) {
 
     // Rejected
     socket.on("rejected", ({ reason }) => {
-      alert("Rejected by host: " + (reason || ""));
+      alert("Rejected: " + (reason || ""));
       window.location.href = "/";
     });
 
@@ -321,9 +343,9 @@ export default function RoomClient({ roomId }) {
       }
     });
 
-    // ⭐ CLEANUP - Don't disconnect socket, just remove listeners
+    // Cleanup
     return () => {
-      console.log("[SOCKET] Cleaning up listeners...");
+      console.log("[SOCKET] Cleaning up...");
       socket.off("connect", handleConnect);
       socket.off("you-are-host");
       socket.off("waiting-for-host");
@@ -338,9 +360,9 @@ export default function RoomClient({ roomId }) {
       socket.off("rejected");
       socket.off("disconnect");
     };
-  }, [localStream, username, roomId, awaitCreateOffer]);
+  }, [localStream, roomId, username, awaitCreateOffer]);
 
-  // Toggle functions
+  // Toggles
   const toggleMic = () => {
     const track = localStream?.getAudioTracks()[0];
     if (track) {
@@ -358,12 +380,10 @@ export default function RoomClient({ roomId }) {
   };
 
   const admitUser = (id) => {
-    console.log("[ACTION] Admitting:", id);
     socketRef.current?.emit("admit-user", { roomId, userId: id });
   };
 
   const rejectUser = (id) => {
-    console.log("[ACTION] Rejecting:", id);
     socketRef.current?.emit("reject-user", { roomId, userId: id });
   };
 
@@ -373,7 +393,7 @@ export default function RoomClient({ roomId }) {
     window.location.href = "/";
   };
 
-  // ⭐ LOADING STATE
+  // ⭐ Loading
   if (!localStream) {
     return (
       <div className="waiting-screen">
@@ -385,13 +405,13 @@ export default function RoomClient({ roomId }) {
     );
   }
 
-  // ⭐ WAITING SCREEN
+  // ⭐ Waiting screen
   if (!isHost && !isAdmitted && waiting) {
     return (
       <div className="waiting-screen">
         <div className="waiting-card">
           <h2>⏳ Waiting for host to admit you…</h2>
-          <p>Please wait. The host will let you in soon.</p>
+          <p>Room: {roomId}</p>
           <p style={{ fontSize: "12px", opacity: 0.6, marginTop: "10px" }}>
             Status: {connectionStatus} | Socket: {localSocketId || "connecting..."}
           </p>
@@ -414,7 +434,7 @@ export default function RoomClient({ roomId }) {
     );
   }
 
-  // ⭐ MAIN ROOM UI
+  // ⭐ Main room
   return (
     <div className="room-root">
       <div className="topbar">
@@ -442,7 +462,6 @@ export default function RoomClient({ roomId }) {
         </div>
       </div>
 
-      {/* Sidebar */}
       <div className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <button className="close-sidebar" onClick={() => setSidebarOpen(false)}>
           ✖
@@ -489,7 +508,6 @@ export default function RoomClient({ roomId }) {
         )}
       </div>
 
-      {/* Video Grid */}
       <main className="video-area">
         <VideoGrid
           localStream={localStream}
@@ -500,7 +518,6 @@ export default function RoomClient({ roomId }) {
         />
       </main>
 
-      {/* Controls */}
       <footer className="controls-wrap">
         <Controls
           micOn={micOn}
