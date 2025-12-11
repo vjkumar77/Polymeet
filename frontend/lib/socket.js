@@ -1,11 +1,9 @@
 import { io } from "socket.io-client";
-
 let socket;
-
 export function initSocket() {
   if (!socket) {
     socket = io("https://polymeet.onrender.com", {
-      transports: ["websocket"], // ⭐ only websocket
+      transports: ["websocket"],
       upgrade: false,
       withCredentials: true,
       reconnection: true,

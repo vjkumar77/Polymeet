@@ -28,25 +28,12 @@ export default function HomePage() {
 
   return (
     <div className="home-root">
-      <Hero />
-
-      <div className="home-cta">
-        <button className="btn primary" onClick={startMeeting}>
-          Start Meeting
-        </button>
-
-        <div className="join-box">
-          <input
-            value={joinId}
-            onChange={(e) => setJoinId(e.target.value)}
-            placeholder="Enter meeting ID"
-            className="join-input"
-          />
-          <button className="btn" onClick={joinMeeting}>
-            Join Meeting
-          </button>
-        </div>
-      </div>
+      <Hero
+        startMeeting={startMeeting}
+        joinMeeting={joinMeeting}
+        joinId={joinId}
+        setJoinId={setJoinId}
+      />
 
       <Features />
       <Steps />
