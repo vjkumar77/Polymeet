@@ -509,14 +509,16 @@ export default function RoomClient({ roomId }) {
       </div>
 
       <main className="video-area">
-        <VideoGrid
-          localStream={localStream}
-          remoteStreams={remoteStreams}
-          participants={participants}
-          localName={username}
-          localId={localSocketId}
-        />
-      </main>
+        
+      <VideoGrid
+        localStream={localStream}
+        remoteStreams={remoteStreams}
+        participants={participants}
+        localName={username}
+        localId={localSocketId}
+        isHost={isHost}  // ⭐ Add this line!
+      />
+            </main>
 
       <footer className="controls-wrap">
         <Controls

@@ -15,25 +15,32 @@ export default function VideoGrid({
   const [speakingUsers, setSpeakingUsers] = useState({});
   const audioContextRef = useRef(null);
   const analysersRef = useRef({});
+  const animationFrameRef = useRef({});
 
   // ⭐ Speaking detection using Web Audio API
   useEffect(() => {
-    if (!localStream) return;
+    // Skip if no streams
+    if (!localStream && Object.keys(remoteStreams).length === 0) return;
 
-    // Initialize AudioContext
+    // Initialize AudioContext (only once)
     if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      try {
+        audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (e) {
+        console.warn("AudioContext not supported");
+        return;
+      }
     }
 
     const audioContext = audioContextRef.current;
 
-    // Analyze local stream
-    const analyzeStream = (stream, odtreamId) => {
-      if (!stream || analysersRef.current[streamId]) return;
+    // Function to analyze a stream
+    const analyzeStream = (stream, id) => {  // ✅ FIXED: "id" instead of typo
+      if (!stream || analysersRef.current[id]) return;
 
       try {
         const audioTrack = stream.getAudioTracks()[0];
-        if (!audioTrack) return;
+        if (!audioTrack || !audioTrack.enabled) return;
 
         const source = audioContext.createMediaStreamSource(stream);
         const analyser = audioContext.createAnalyser();
@@ -41,64 +48,76 @@ export default function VideoGrid({
         analyser.smoothingTimeConstant = 0.5;
         source.connect(analyser);
 
-        analysersRef.current[streamId] = { analyser, source };
+        analysersRef.current[id] = { analyser, source };
 
         const dataArray = new Uint8Array(analyser.frequencyBinCount);
 
         const checkVolume = () => {
-          if (!analysersRef.current[streamId]) return;
-          
+          if (!analysersRef.current[id]) return;
+
           analyser.getByteFrequencyData(dataArray);
           const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-          
+
           // Threshold for speaking detection
           const isSpeaking = average > 25;
-          
-          setSpeakingUsers(prev => {
-            if (prev[streamId] !== isSpeaking) {
-              return { ...prev, [streamId]: isSpeaking };
+
+          setSpeakingUsers((prev) => {
+            if (prev[id] !== isSpeaking) {
+              return { ...prev, [id]: isSpeaking };
             }
             return prev;
           });
 
-          requestAnimationFrame(checkVolume);
+          animationFrameRef.current[id] = requestAnimationFrame(checkVolume);
         };
 
         checkVolume();
       } catch (e) {
-        console.warn("Audio analysis error:", e);
+        console.warn("Audio analysis error for", id, e);
       }
     };
 
     // Analyze local stream
-    analyzeStream(localStream, "local");
+    if (localStream) {
+      analyzeStream(localStream, "local");
+    }
 
     // Analyze remote streams
     Object.entries(remoteStreams).forEach(([peerId, stream]) => {
-      analyzeStream(stream, peerId);
+      if (stream) {
+        analyzeStream(stream, peerId);
+      }
     });
 
+    // Cleanup function
     return () => {
-      // Cleanup analysers
-      Object.values(analysersRef.current).forEach(({ source }) => {
+      // Cancel all animation frames
+      Object.values(animationFrameRef.current).forEach((id) => {
+        cancelAnimationFrame(id);
+      });
+      animationFrameRef.current = {};
+
+      // Disconnect all sources
+      Object.entries(analysersRef.current).forEach(([id, { source }]) => {
         try {
           source.disconnect();
         } catch (e) {}
       });
+      analysersRef.current = {};
     };
   }, [localStream, remoteStreams]);
 
   // Build videos array
   const videos = [];
 
-  // Local video
+  // Local video first
   videos.push({
     id: "local",
-    odtreamId: "local",
+    visibilityId: "local",
     stream: localStream,
     isLocal: true,
     name: localName,
-    isHost: isHost,
+    isHostUser: isHost,
   });
 
   // Remote videos
@@ -109,11 +128,11 @@ export default function VideoGrid({
 
     videos.push({
       id: pid,
-      streamId: pid,
+      visibilityId: pid,
       stream,
       isLocal: false,
       name,
-      isHost: false,
+      isHostUser: false,
     });
   });
 
@@ -122,8 +141,9 @@ export default function VideoGrid({
   return (
     <div className={gridClass}>
       {videos.map((v) => {
-        const isSpeaking = speakingUsers[v.streamId];
-        const hasVideo = v.stream?.getVideoTracks()[0]?.enabled;
+        const isSpeaking = speakingUsers[v.visibilityId] || false;
+        const videoTrack = v.stream?.getVideoTracks()[0];
+        const hasVideo = videoTrack?.enabled !== false;
 
         return (
           <div
@@ -140,11 +160,11 @@ export default function VideoGrid({
                   el.srcObject = v.stream;
                 }
               }}
-              style={{ display: hasVideo !== false ? "block" : "none" }}
+              style={{ display: hasVideo ? "block" : "none" }}
             />
 
             {/* No video placeholder */}
-            {hasVideo === false && (
+            {!hasVideo && (
               <div className="no-video">
                 <div className="avatar-placeholder">
                   {v.name.charAt(0).toUpperCase()}
@@ -153,7 +173,7 @@ export default function VideoGrid({
             )}
 
             {/* Host badge */}
-            {v.isHost && <div className="host-badge-tile">Host</div>}
+            {v.isHostUser && <div className="host-badge-tile">Host</div>}
 
             {/* User label with speaking indicator */}
             <div className="user-label">
