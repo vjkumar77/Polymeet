@@ -1,4 +1,5 @@
 "use client";
+import "./styles/home.css";
 
 import RoomClient from "./RoomClient";
 import { use } from "react";
