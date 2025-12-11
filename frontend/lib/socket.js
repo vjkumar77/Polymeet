@@ -4,7 +4,7 @@ let socket;
 
 export function initSocket() {
   if (!socket) {
-    socket = io("https://live-meeting-backend.onrender.com", {
+    socket = io("https://polymeet.onrender.com", {
       transports: ["websocket"], // ⭐ only websocket
       upgrade: false,
       withCredentials: true,
