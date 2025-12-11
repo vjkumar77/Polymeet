@@ -1,12 +1,14 @@
-"use client";
+"use client";  // MUST BE FIRST LINE
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+
 import Hero from "@/components/Hero";
 import Features from "@/components/Features";
 import Steps from "@/components/Steps";
 import Footer from "@/components/Footer";
-import "@/app/styles/home.css"; 
+
+import "@/app/styles/home.css";
 
 export default function HomePage() {
   const router = useRouter();
@@ -22,17 +24,15 @@ export default function HomePage() {
   };
 
   const joinMeeting = () => {
-    const id = joinId.trim();
-    if (!id) {
+    if (!joinId.trim()) {
       alert("Enter meeting id");
       return;
     }
-    router.push(`/room/${id}`);
+    router.push(`/room/${joinId.trim()}`);
   };
 
   return (
     <div className="home-root">
-
       <Hero />
 
       <div className="home-cta">
@@ -42,12 +42,11 @@ export default function HomePage() {
 
         <div className="join-box">
           <input
+            placeholder="Enter meeting id"
             value={joinId}
             onChange={(e) => setJoinId(e.target.value)}
-            placeholder="Enter meeting id"
             className="join-input"
           />
-
           <button className="btn" onClick={joinMeeting}>
             Join Meeting
           </button>
@@ -57,7 +56,6 @@ export default function HomePage() {
       <Features />
       <Steps />
       <Footer />
-
     </div>
   );
 }
