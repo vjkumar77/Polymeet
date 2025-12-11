@@ -1,8 +1,93 @@
 // components/VideoGrid.jsx
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback, memo } from "react";
 import "./videogrid.css";
+
+// ⭐ Memoized Video Tile to prevent unnecessary re-renders
+const VideoTile = memo(function VideoTile({ 
+  id, 
+  stream, 
+  isLocal, 
+  name, 
+  isHostUser, 
+  isSpeaking 
+}) {
+  const videoRef = useRef(null);
+  const [hasVideo, setHasVideo] = useState(true);
+
+  // ⭐ Set video srcObject only when stream changes
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      if (videoRef.current.srcObject !== stream) {
+        videoRef.current.srcObject = stream;
+      }
+    }
+  }, [stream]);
+
+  // ⭐ Check video track status
+  useEffect(() => {
+    if (!stream) {
+      setHasVideo(false);
+      return;
+    }
+
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack) {
+      setHasVideo(false);
+      return;
+    }
+
+    // Initial state
+    setHasVideo(videoTrack.enabled && videoTrack.readyState === 'live');
+
+    // Listen for track changes
+    const handleEnded = () => setHasVideo(false);
+    const handleMute = () => setHasVideo(false);
+    const handleUnmute = () => setHasVideo(true);
+
+    videoTrack.addEventListener('ended', handleEnded);
+    videoTrack.addEventListener('mute', handleMute);
+    videoTrack.addEventListener('unmute', handleUnmute);
+
+    return () => {
+      videoTrack.removeEventListener('ended', handleEnded);
+      videoTrack.removeEventListener('mute', handleMute);
+      videoTrack.removeEventListener('unmute', handleUnmute);
+    };
+  }, [stream]);
+
+  return (
+    <div className={`video-tile ${isSpeaking ? "speaking" : ""}`}>
+      {/* Video element */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted={isLocal}
+        style={{ display: hasVideo ? "block" : "none" }}
+      />
+
+      {/* No video placeholder */}
+      {!hasVideo && (
+        <div className="no-video">
+          <div className="avatar-placeholder">
+            {name.charAt(0).toUpperCase()}
+          </div>
+        </div>
+      )}
+
+      {/* Host badge */}
+      {isHostUser && <div className="host-badge-tile">Host</div>}
+
+      {/* User label with speaking indicator */}
+      <div className="user-label">
+        {isSpeaking && <span className="speaking-dot"></span>}
+        {isLocal ? `${name} (You)` : name}
+      </div>
+    </div>
+  );
+});
 
 export default function VideoGrid({
   localStream,
@@ -15,14 +100,24 @@ export default function VideoGrid({
   const [speakingUsers, setSpeakingUsers] = useState({});
   const audioContextRef = useRef(null);
   const analysersRef = useRef({});
-  const animationFrameRef = useRef({});
+  const speakingRef = useRef({}); // ⭐ Use ref to track speaking without re-renders
+  const updateTimeoutRef = useRef(null);
 
-  // ⭐ Speaking detection using Web Audio API
+  // ⭐ Debounced state update - only update UI every 200ms
+  const updateSpeakingState = useCallback(() => {
+    if (updateTimeoutRef.current) return;
+    
+    updateTimeoutRef.current = setTimeout(() => {
+      setSpeakingUsers({ ...speakingRef.current });
+      updateTimeoutRef.current = null;
+    }, 200); // Update UI only every 200ms
+  }, []);
+
+  // ⭐ Speaking detection with debouncing
   useEffect(() => {
-    // Skip if no streams
     if (!localStream && Object.keys(remoteStreams).length === 0) return;
 
-    // Initialize AudioContext (only once)
+    // Initialize AudioContext
     if (!audioContextRef.current) {
       try {
         audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
@@ -33,47 +128,65 @@ export default function VideoGrid({
     }
 
     const audioContext = audioContextRef.current;
+    const animationFrames = {};
 
-    // Function to analyze a stream
-    const analyzeStream = (stream, id) => {  // ✅ FIXED: "id" instead of typo
-      if (!stream || analysersRef.current[id]) return;
+    // Analyze stream for speaking
+    const analyzeStream = (stream, odtreamId) => {
+      if (!stream || analysersRef.current[odtreamId]) return;
 
       try {
         const audioTrack = stream.getAudioTracks()[0];
-        if (!audioTrack || !audioTrack.enabled) return;
+        if (!audioTrack) return;
 
         const source = audioContext.createMediaStreamSource(stream);
         const analyser = audioContext.createAnalyser();
-        analyser.fftSize = 256;
-        analyser.smoothingTimeConstant = 0.5;
+        analyser.fftSize = 512;
+        analyser.smoothingTimeConstant = 0.8; // ⭐ More smoothing
         source.connect(analyser);
 
-        analysersRef.current[id] = { analyser, source };
+        analysersRef.current[odtreamId] = { analyser, source };
 
         const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        let frameCount = 0;
 
         const checkVolume = () => {
-          if (!analysersRef.current[id]) return;
+          if (!analysersRef.current[odtreamId]) return;
+
+          frameCount++;
+          
+          // ⭐ Only check every 3rd frame (20fps instead of 60fps)
+          if (frameCount % 3 !== 0) {
+            animationFrames[odtreamId] = requestAnimationFrame(checkVolume);
+            return;
+          }
 
           analyser.getByteFrequencyData(dataArray);
-          const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+          
+          // ⭐ Better average calculation (focus on voice frequencies 85-255 Hz)
+          let sum = 0;
+          const startBin = Math.floor(85 * analyser.fftSize / audioContext.sampleRate);
+          const endBin = Math.floor(500 * analyser.fftSize / audioContext.sampleRate);
+          
+          for (let i = startBin; i < endBin && i < dataArray.length; i++) {
+            sum += dataArray[i];
+          }
+          const average = sum / (endBin - startBin);
 
-          // Threshold for speaking detection
-          const isSpeaking = average > 25;
+          // Threshold for speaking
+          const isSpeaking = average > 30;
+          
+          // ⭐ Update ref (not state) to avoid re-renders
+          if (speakingRef.current[odtreamId] !== isSpeaking) {
+            speakingRef.current[odtreamId] = isSpeaking;
+            updateSpeakingState(); // Debounced UI update
+          }
 
-          setSpeakingUsers((prev) => {
-            if (prev[id] !== isSpeaking) {
-              return { ...prev, [id]: isSpeaking };
-            }
-            return prev;
-          });
-
-          animationFrameRef.current[id] = requestAnimationFrame(checkVolume);
+          animationFrames[odtreamId] = requestAnimationFrame(checkVolume);
         };
 
         checkVolume();
       } catch (e) {
-        console.warn("Audio analysis error for", id, e);
+        console.warn("Audio analysis error:", e);
       }
     };
 
@@ -89,31 +202,32 @@ export default function VideoGrid({
       }
     });
 
-    // Cleanup function
+    // Cleanup
     return () => {
-      // Cancel all animation frames
-      Object.values(animationFrameRef.current).forEach((id) => {
-        cancelAnimationFrame(id);
-      });
-      animationFrameRef.current = {};
+      // Cancel animation frames
+      Object.values(animationFrames).forEach(cancelAnimationFrame);
+      
+      // Clear timeout
+      if (updateTimeoutRef.current) {
+        clearTimeout(updateTimeoutRef.current);
+      }
 
-      // Disconnect all sources
+      // Disconnect sources
       Object.entries(analysersRef.current).forEach(([id, { source }]) => {
         try {
           source.disconnect();
         } catch (e) {}
+        delete analysersRef.current[id];
       });
-      analysersRef.current = {};
     };
-  }, [localStream, remoteStreams]);
+  }, [localStream, remoteStreams, updateSpeakingState]);
 
   // Build videos array
   const videos = [];
 
-  // Local video first
+  // Local video
   videos.push({
-    id: "local",
-    visibilityId: "local",
+    odtreamId: "local",
     stream: localStream,
     isLocal: true,
     name: localName,
@@ -127,8 +241,7 @@ export default function VideoGrid({
     const name = p?.username || `User-${pid.slice(0, 6)}`;
 
     videos.push({
-      id: pid,
-      visibilityId: pid,
+      odtreamId: pid,
       stream,
       isLocal: false,
       name,
@@ -140,49 +253,17 @@ export default function VideoGrid({
 
   return (
     <div className={gridClass}>
-      {videos.map((v) => {
-        const isSpeaking = speakingUsers[v.visibilityId] || false;
-        const videoTrack = v.stream?.getVideoTracks()[0];
-        const hasVideo = videoTrack?.enabled !== false;
-
-        return (
-          <div
-            key={v.id}
-            className={`video-tile ${isSpeaking ? "speaking" : ""}`}
-          >
-            {/* Video element */}
-            <video
-              autoPlay
-              playsInline
-              muted={v.isLocal}
-              ref={(el) => {
-                if (el && v.stream) {
-                  el.srcObject = v.stream;
-                }
-              }}
-              style={{ display: hasVideo ? "block" : "none" }}
-            />
-
-            {/* No video placeholder */}
-            {!hasVideo && (
-              <div className="no-video">
-                <div className="avatar-placeholder">
-                  {v.name.charAt(0).toUpperCase()}
-                </div>
-              </div>
-            )}
-
-            {/* Host badge */}
-            {v.isHostUser && <div className="host-badge-tile">Host</div>}
-
-            {/* User label with speaking indicator */}
-            <div className="user-label">
-              {isSpeaking && <span className="speaking-dot"></span>}
-              {v.isLocal ? `${v.name} (You)` : v.name}
-            </div>
-          </div>
-        );
-      })}
+      {videos.map((v) => (
+        <VideoTile
+          key={v.odtreamId}
+          id={v.odtreamId}
+          stream={v.stream}
+          isLocal={v.isLocal}
+          name={v.name}
+          isHostUser={v.isHostUser}
+          isSpeaking={speakingUsers[v.odtreamId] || false}
+        />
+      ))}
     </div>
   );
 }
