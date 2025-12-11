@@ -149,16 +149,53 @@ io.on("connection", (socket) => {
      DISCONNECT
   ------------------------- */
   socket.on("disconnect", () => {
-    console.log("[SERVER] disconnected:", socket.id);
+  console.log("[SERVER] disconnect:", socket.id);
 
-    for (const rid of Object.keys(roomUsers)) {
-      const i = roomUsers[rid].findIndex((u) => u.id === socket.id);
-      if (i !== -1) {
-        roomUsers[rid].splice(i, 1);
-        io.in(rid).emit("user-left", socket.id);
+  // Remove from roomUsers
+  for (const rid of Object.keys(roomUsers)) {
+    const idx = roomUsers[rid].findIndex((u) => u.id === socket.id);
+    if (idx !== -1) {
+      const wasHost = idx === 0;
+      roomUsers[rid].splice(idx, 1);
+
+      io.in(rid).emit("user-left", socket.id);
+
+      // Transfer host if needed
+      if (wasHost && roomUsers[rid].length > 0) {
+        const newHost = roomUsers[rid][0];
+        io.to(newHost.id).emit("you-are-host");
+        io.to(newHost.id).emit("pending-requests", pendingRequests[rid] || []);
+        console.log("[SERVER] Host transferred to:", newHost.id);
       }
+
+      break;
     }
-  });
+  }
+
+  // Remove from pendingRequests
+  for (const rid of Object.keys(pendingRequests)) {
+    const idx = pendingRequests[rid].findIndex((u) => u.id === socket.id);
+    if (idx !== -1) {
+      pendingRequests[rid].splice(idx, 1);
+
+      const host = roomUsers[rid] && roomUsers[rid][0];
+      if (host) io.to(host.id).emit("pending-requests", pendingRequests[rid] || []);
+
+      break;
+    }
+  }
+
+  // FINAL — delete empty rooms
+  for (const rid of Object.keys(roomUsers)) {
+    const active = io.sockets.adapter.rooms.get(rid);
+    if (!active || active.size === 0) {
+      console.log("[SERVER] Cleaning empty room:", rid);
+      delete roomUsers[rid];
+      delete pendingRequests[rid];
+    }
+  }
+});
+
 });
 
 app.get("/", (req, res) => res.send("Backend running"));
