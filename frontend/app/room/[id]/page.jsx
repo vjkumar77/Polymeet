@@ -1,5 +1,5 @@
 "use client";
-import "./styles/home.css";
+import "../../styles/home.css";  // ✅ CORRECT
 
 import RoomClient from "@/app/room/[id]/RoomClient";
 
