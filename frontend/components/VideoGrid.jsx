@@ -4,62 +4,28 @@
 import { useEffect, useRef, useState, useCallback, memo } from "react";
 import "./videogrid.css";
 
-// ⭐ Memoized Video Tile to prevent unnecessary re-renders
-const VideoTile = memo(function VideoTile({ 
-  id, 
-  stream, 
-  isLocal, 
-  name, 
-  isHostUser, 
-  isSpeaking 
+// ⭐ Memoized Video Tile - prevents re-renders
+const VideoTile = memo(function VideoTile({
+  stream,
+  isLocal,
+  name,
+  isHostUser,
+  isSpeaking,
 }) {
   const videoRef = useRef(null);
-  const [hasVideo, setHasVideo] = useState(true);
 
-  // ⭐ Set video srcObject only when stream changes
+  // Set srcObject only when stream reference changes
   useEffect(() => {
-    if (videoRef.current && stream) {
-      if (videoRef.current.srcObject !== stream) {
-        videoRef.current.srcObject = stream;
-      }
+    const video = videoRef.current;
+    if (video && stream && video.srcObject !== stream) {
+      video.srcObject = stream;
     }
   }, [stream]);
 
-  // ⭐ Check video track status
-  useEffect(() => {
-    if (!stream) {
-      setHasVideo(false);
-      return;
-    }
-
-    const videoTrack = stream.getVideoTracks()[0];
-    if (!videoTrack) {
-      setHasVideo(false);
-      return;
-    }
-
-    // Initial state
-    setHasVideo(videoTrack.enabled && videoTrack.readyState === 'live');
-
-    // Listen for track changes
-    const handleEnded = () => setHasVideo(false);
-    const handleMute = () => setHasVideo(false);
-    const handleUnmute = () => setHasVideo(true);
-
-    videoTrack.addEventListener('ended', handleEnded);
-    videoTrack.addEventListener('mute', handleMute);
-    videoTrack.addEventListener('unmute', handleUnmute);
-
-    return () => {
-      videoTrack.removeEventListener('ended', handleEnded);
-      videoTrack.removeEventListener('mute', handleMute);
-      videoTrack.removeEventListener('unmute', handleUnmute);
-    };
-  }, [stream]);
+  const hasVideo = stream?.getVideoTracks()[0]?.enabled !== false;
 
   return (
     <div className={`video-tile ${isSpeaking ? "speaking" : ""}`}>
-      {/* Video element */}
       <video
         ref={videoRef}
         autoPlay
@@ -68,7 +34,6 @@ const VideoTile = memo(function VideoTile({
         style={{ display: hasVideo ? "block" : "none" }}
       />
 
-      {/* No video placeholder */}
       {!hasVideo && (
         <div className="no-video">
           <div className="avatar-placeholder">
@@ -77,10 +42,8 @@ const VideoTile = memo(function VideoTile({
         </div>
       )}
 
-      {/* Host badge */}
       {isHostUser && <div className="host-badge-tile">Host</div>}
 
-      {/* User label with speaking indicator */}
       <div className="user-label">
         {isSpeaking && <span className="speaking-dot"></span>}
         {isLocal ? `${name} (You)` : name}
@@ -98,41 +61,34 @@ export default function VideoGrid({
   isHost = false,
 }) {
   const [speakingUsers, setSpeakingUsers] = useState({});
-  const audioContextRef = useRef(null);
+  const speakingRef = useRef({});
   const analysersRef = useRef({});
-  const speakingRef = useRef({}); // ⭐ Use ref to track speaking without re-renders
-  const updateTimeoutRef = useRef(null);
+  const intervalRef = useRef(null);
 
-  // ⭐ Debounced state update - only update UI every 200ms
-  const updateSpeakingState = useCallback(() => {
-    if (updateTimeoutRef.current) return;
-    
-    updateTimeoutRef.current = setTimeout(() => {
-      setSpeakingUsers({ ...speakingRef.current });
-      updateTimeoutRef.current = null;
-    }, 200); // Update UI only every 200ms
-  }, []);
-
-  // ⭐ Speaking detection with debouncing
+  // ⭐ OPTIMIZED: Use setInterval instead of requestAnimationFrame
+  // This is more efficient and doesn't cause re-renders
   useEffect(() => {
-    if (!localStream && Object.keys(remoteStreams).length === 0) return;
+    const streams = {
+      local: localStream,
+      ...remoteStreams,
+    };
 
-    // Initialize AudioContext
-    if (!audioContextRef.current) {
-      try {
-        audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
-      } catch (e) {
-        console.warn("AudioContext not supported");
-        return;
-      }
+    // Skip if no streams
+    const streamIds = Object.keys(streams).filter((id) => streams[id]);
+    if (streamIds.length === 0) return;
+
+    let audioContext;
+    try {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    } catch (e) {
+      console.warn("AudioContext not supported");
+      return;
     }
 
-    const audioContext = audioContextRef.current;
-    const animationFrames = {};
-
-    // Analyze stream for speaking
-    const analyzeStream = (stream, odtreamId) => {
-      if (!stream || analysersRef.current[odtreamId]) return;
+    // Setup analysers for each stream
+    streamIds.forEach((id) => {
+      const stream = streams[id];
+      if (!stream || analysersRef.current[id]) return;
 
       try {
         const audioTrack = stream.getAudioTracks()[0];
@@ -140,114 +96,82 @@ export default function VideoGrid({
 
         const source = audioContext.createMediaStreamSource(stream);
         const analyser = audioContext.createAnalyser();
-        analyser.fftSize = 512;
-        analyser.smoothingTimeConstant = 0.8; // ⭐ More smoothing
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.85;
         source.connect(analyser);
 
-        analysersRef.current[odtreamId] = { analyser, source };
-
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        let frameCount = 0;
-
-        const checkVolume = () => {
-          if (!analysersRef.current[odtreamId]) return;
-
-          frameCount++;
-          
-          // ⭐ Only check every 3rd frame (20fps instead of 60fps)
-          if (frameCount % 3 !== 0) {
-            animationFrames[odtreamId] = requestAnimationFrame(checkVolume);
-            return;
-          }
-
-          analyser.getByteFrequencyData(dataArray);
-          
-          // ⭐ Better average calculation (focus on voice frequencies 85-255 Hz)
-          let sum = 0;
-          const startBin = Math.floor(85 * analyser.fftSize / audioContext.sampleRate);
-          const endBin = Math.floor(500 * analyser.fftSize / audioContext.sampleRate);
-          
-          for (let i = startBin; i < endBin && i < dataArray.length; i++) {
-            sum += dataArray[i];
-          }
-          const average = sum / (endBin - startBin);
-
-          // Threshold for speaking
-          const isSpeaking = average > 30;
-          
-          // ⭐ Update ref (not state) to avoid re-renders
-          if (speakingRef.current[odtreamId] !== isSpeaking) {
-            speakingRef.current[odtreamId] = isSpeaking;
-            updateSpeakingState(); // Debounced UI update
-          }
-
-          animationFrames[odtreamId] = requestAnimationFrame(checkVolume);
+        analysersRef.current[id] = {
+          analyser,
+          source,
+          dataArray: new Uint8Array(analyser.frequencyBinCount),
         };
-
-        checkVolume();
       } catch (e) {
-        console.warn("Audio analysis error:", e);
-      }
-    };
-
-    // Analyze local stream
-    if (localStream) {
-      analyzeStream(localStream, "local");
-    }
-
-    // Analyze remote streams
-    Object.entries(remoteStreams).forEach(([peerId, stream]) => {
-      if (stream) {
-        analyzeStream(stream, peerId);
+        console.warn("Audio setup error:", e);
       }
     });
+
+    // ⭐ Check speaking every 150ms (not every frame!)
+    intervalRef.current = setInterval(() => {
+      let hasChanges = false;
+
+      Object.entries(analysersRef.current).forEach(([id, { analyser, dataArray }]) => {
+        analyser.getByteFrequencyData(dataArray);
+        
+        // Calculate average volume
+        const sum = dataArray.reduce((a, b) => a + b, 0);
+        const average = sum / dataArray.length;
+        
+        const isSpeaking = average > 25;
+        
+        if (speakingRef.current[id] !== isSpeaking) {
+          speakingRef.current[id] = isSpeaking;
+          hasChanges = true;
+        }
+      });
+
+      // ⭐ Only update state if something changed
+      if (hasChanges) {
+        setSpeakingUsers({ ...speakingRef.current });
+      }
+    }, 150); // Check every 150ms
 
     // Cleanup
     return () => {
-      // Cancel animation frames
-      Object.values(animationFrames).forEach(cancelAnimationFrame);
-      
-      // Clear timeout
-      if (updateTimeoutRef.current) {
-        clearTimeout(updateTimeoutRef.current);
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
       }
 
-      // Disconnect sources
-      Object.entries(analysersRef.current).forEach(([id, { source }]) => {
+      Object.values(analysersRef.current).forEach(({ source }) => {
         try {
           source.disconnect();
         } catch (e) {}
-        delete analysersRef.current[id];
       });
+      analysersRef.current = {};
+      speakingRef.current = {};
+
+      if (audioContext.state !== "closed") {
+        audioContext.close();
+      }
     };
-  }, [localStream, remoteStreams, updateSpeakingState]);
+  }, [localStream, remoteStreams]);
 
   // Build videos array
-  const videos = [];
-
-  // Local video
-  videos.push({
-    odtreamId: "local",
-    stream: localStream,
-    isLocal: true,
-    name: localName,
-    isHostUser: isHost,
-  });
-
-  // Remote videos
-  Object.keys(remoteStreams).forEach((pid) => {
-    const stream = remoteStreams[pid];
-    const p = participants.find((x) => x.id === pid);
-    const name = p?.username || `User-${pid.slice(0, 6)}`;
-
-    videos.push({
-      odtreamId: pid,
-      stream,
+  const videos = [
+    {
+      id: "local",
+      stream: localStream,
+      isLocal: true,
+      name: localName,
+      isHostUser: isHost,
+    },
+    ...Object.keys(remoteStreams).map((pid) => ({
+      id: pid,
+      stream: remoteStreams[pid],
       isLocal: false,
-      name,
+      name: participants.find((x) => x.id === pid)?.username || `User-${pid.slice(0, 6)}`,
       isHostUser: false,
-    });
-  });
+    })),
+  ];
 
   const gridClass = videos.length === 1 ? "video-grid single-view" : "video-grid";
 
@@ -255,13 +179,12 @@ export default function VideoGrid({
     <div className={gridClass}>
       {videos.map((v) => (
         <VideoTile
-          key={v.odtreamId}
-          id={v.odtreamId}
+          key={v.id}
           stream={v.stream}
           isLocal={v.isLocal}
           name={v.name}
           isHostUser={v.isHostUser}
-          isSpeaking={speakingUsers[v.odtreamId] || false}
+          isSpeaking={speakingUsers[v.id] || false}
         />
       ))}
     </div>

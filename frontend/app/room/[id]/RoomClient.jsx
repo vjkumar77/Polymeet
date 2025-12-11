@@ -18,7 +18,6 @@ import {
 } from "@/lib/webrtc";
 
 export default function RoomClient({ roomId }) {
-  // ⭐ VALIDATE ROOMID IMMEDIATELY
   console.log("[RoomClient] Mounted with roomId:", roomId);
 
   const socketRef = useRef(null);
@@ -38,8 +37,11 @@ export default function RoomClient({ roomId }) {
   const [isAdmitted, setIsAdmitted] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState("connecting");
+  
+  // ⭐ Meeting ended state
+  const [meetingEnded, setMeetingEnded] = useState(false);
+  const [endReason, setEndReason] = useState("");
 
-  // ⭐ Generate username once on mount
   const [username] = useState(() => {
     const name = `User-${Math.floor(Math.random() * 10000)}`;
     console.log("[RoomClient] Generated username:", name);
@@ -72,7 +74,7 @@ export default function RoomClient({ roomId }) {
     }
   }, []);
 
-  // ⭐ Initialize local stream
+  // Initialize local stream
   useEffect(() => {
     mountedRef.current = true;
 
@@ -100,27 +102,20 @@ export default function RoomClient({ roomId }) {
     };
   }, []);
 
-  // ⭐ SOCKET LOGIC
+  // SOCKET LOGIC
   useEffect(() => {
-    // ⭐ CRITICAL: Validate all required data before proceeding
     if (!localStream) {
       console.log("[SOCKET] ⏳ Waiting for localStream...");
       return;
     }
 
-    if (!roomId) {
-      console.error("[SOCKET] ❌ roomId is undefined!");
-      return;
-    }
-
-    if (!username) {
-      console.error("[SOCKET] ❌ username is undefined!");
+    if (!roomId || !username) {
+      console.error("[SOCKET] ❌ Missing roomId or username");
       return;
     }
 
     console.log("[SOCKET] ✅ All data ready:", { roomId, username });
 
-    // Reset refs
     joinRequestSentRef.current = false;
     isHostRef.current = false;
     joinedRef.current = false;
@@ -128,22 +123,14 @@ export default function RoomClient({ roomId }) {
     const socket = initSocket();
     socketRef.current = socket;
 
-    // ⭐ Send join request function
     const sendJoinRequest = () => {
-      if (joinRequestSentRef.current) {
-        console.log("[SOCKET] Join already sent, skipping");
-        return;
-      }
+      if (joinRequestSentRef.current) return;
 
-      // ⭐ DOUBLE CHECK before sending
-      if (!roomId || !username) {
-        console.error("[SOCKET] ❌ Cannot send join-request, missing data:", { roomId, username });
-        return;
-      }
+      if (!roomId || !username) return;
 
       const payload = { roomId, username };
       console.log("[SOCKET] 📤 Sending join-request:", JSON.stringify(payload));
-      
+
       joinRequestSentRef.current = true;
       setWaiting(true);
       setConnectionStatus("joining");
@@ -151,27 +138,18 @@ export default function RoomClient({ roomId }) {
       socket.emit("join-request", payload);
     };
 
-    // Handle connect
     const handleConnect = () => {
       console.log("[SOCKET] ✅ Connected:", socket.id);
       if (mountedRef.current) {
         setLocalSocketId(socket.id);
         setConnectionStatus("connected");
       }
-      
-      // ⭐ Small delay to ensure socket is fully ready
-      setTimeout(() => {
-        sendJoinRequest();
-      }, 100);
+      setTimeout(() => sendJoinRequest(), 100);
     };
 
-    // If already connected
     if (socket.connected) {
-      console.log("[SOCKET] Already connected:", socket.id);
       setLocalSocketId(socket.id);
-      setTimeout(() => {
-        sendJoinRequest();
-      }, 100);
+      setTimeout(() => sendJoinRequest(), 100);
     }
 
     socket.on("connect", handleConnect);
@@ -246,13 +224,7 @@ export default function RoomClient({ roomId }) {
       const myId = socket.id;
       const others = users.filter((u) => u.id !== myId);
 
-      setParticipants((prev) => {
-        const merged = [...prev];
-        others.forEach((o) => {
-          if (!merged.some((p) => p.id === o.id)) merged.push(o);
-        });
-        return merged;
-      });
+      setParticipants(others);
 
       others.forEach((u) =>
         createPeerConnection({
@@ -335,6 +307,18 @@ export default function RoomClient({ roomId }) {
       window.location.href = "/";
     });
 
+    // ⭐ MEETING ENDED (Host left or ended meeting)
+    socket.on("meeting-ended", ({ reason }) => {
+      console.log("[SOCKET] 🔴 Meeting ended:", reason);
+      if (!mountedRef.current) return;
+
+      setMeetingEnded(true);
+      setEndReason(reason || "Meeting has ended");
+      
+      // Clean up
+      closeAllConnections();
+    });
+
     // Disconnect
     socket.on("disconnect", (reason) => {
       console.log("[SOCKET] ❌ Disconnected:", reason);
@@ -358,11 +342,12 @@ export default function RoomClient({ roomId }) {
       socket.off("ice-candidate");
       socket.off("user-left");
       socket.off("rejected");
+      socket.off("meeting-ended");
       socket.off("disconnect");
     };
   }, [localStream, roomId, username, awaitCreateOffer]);
 
-  // Toggles
+  // Toggle functions
   const toggleMic = () => {
     const track = localStream?.getAudioTracks()[0];
     if (track) {
@@ -387,13 +372,58 @@ export default function RoomClient({ roomId }) {
     socketRef.current?.emit("reject-user", { roomId, userId: id });
   };
 
+  // ⭐ Leave call (for regular users)
   const leaveCall = () => {
     closeAllConnections();
     disconnectSocket();
     window.location.href = "/";
   };
 
-  // ⭐ Loading
+  // ⭐ End meeting for all (HOST only)
+  const endMeetingForAll = () => {
+    if (!isHost) return;
+    
+    const confirmed = window.confirm(
+      "Are you sure you want to end the meeting for everyone?"
+    );
+    
+    if (confirmed) {
+      socketRef.current?.emit("end-meeting", { roomId });
+      closeAllConnections();
+      disconnectSocket();
+      window.location.href = "/";
+    }
+  };
+
+  // ⭐ MEETING ENDED SCREEN
+  if (meetingEnded) {
+    return (
+      <div className="waiting-screen">
+        <div className="waiting-card">
+          <div style={{ fontSize: "48px", marginBottom: "20px" }}>👋</div>
+          <h2>Meeting Ended</h2>
+          <p style={{ color: "#a1a1aa", marginBottom: "24px" }}>{endReason}</p>
+          <button
+            onClick={() => (window.location.href = "/")}
+            style={{
+              padding: "14px 32px",
+              background: "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)",
+              border: "none",
+              borderRadius: "12px",
+              color: "white",
+              fontSize: "16px",
+              fontWeight: "600",
+              cursor: "pointer",
+            }}
+          >
+            Return to Home
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Loading
   if (!localStream) {
     return (
       <div className="waiting-screen">
@@ -405,15 +435,16 @@ export default function RoomClient({ roomId }) {
     );
   }
 
-  // ⭐ Waiting screen
+  // Waiting screen
   if (!isHost && !isAdmitted && waiting) {
     return (
       <div className="waiting-screen">
         <div className="waiting-card">
-          <h2>⏳ Waiting for host to admit you…</h2>
-          <p>Room: {roomId}</p>
+          <div className="waiting-spinner"></div>
+          <h2>Waiting for host to admit you…</h2>
+          <p>Room: {roomId?.slice(0, 8)}...</p>
           <p style={{ fontSize: "12px", opacity: 0.6, marginTop: "10px" }}>
-            Status: {connectionStatus} | Socket: {localSocketId || "connecting..."}
+            Status: {connectionStatus}
           </p>
           <button
             onClick={leaveCall}
@@ -434,13 +465,13 @@ export default function RoomClient({ roomId }) {
     );
   }
 
-  // ⭐ Main room
+  // Main room
   return (
     <div className="room-root">
       <div className="topbar">
         <div className="room-info">
           <div className="label">Meeting ID</div>
-          <div className="room-id">{roomId}</div>
+          <div className="room-id">{roomId?.slice(0, 8)}...</div>
         </div>
 
         <div className="top-actions">
@@ -451,7 +482,7 @@ export default function RoomClient({ roomId }) {
               alert("Link copied!");
             }}
           >
-            Invite
+            📋 Invite
           </button>
 
           <button className="btn people" onClick={() => setSidebarOpen((s) => !s)}>
@@ -462,6 +493,7 @@ export default function RoomClient({ roomId }) {
         </div>
       </div>
 
+      {/* Sidebar */}
       <div className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <button className="close-sidebar" onClick={() => setSidebarOpen(false)}>
           ✖
@@ -469,11 +501,11 @@ export default function RoomClient({ roomId }) {
         <h3>People</h3>
 
         <div className="section">
-          <div className="section-title">In Meeting</div>
+          <div className="section-title">In Meeting ({participants.length + 1})</div>
           <div className="list">
             <div className="person">
               <div className="name">{username} (You)</div>
-              {isHost && <span className="host-badge">Host</span>}
+              {isHost && <span className="small-badge">Host</span>}
             </div>
             {participants.map((p) => (
               <div className="person" key={p.id}>
@@ -485,7 +517,7 @@ export default function RoomClient({ roomId }) {
 
         {isHost && (
           <div className="section">
-            <div className="section-title">Waiting Room</div>
+            <div className="section-title">Waiting Room ({pendingRequests.length})</div>
             <div className="list">
               {pendingRequests.length === 0 && (
                 <div className="muted">No one waiting</div>
@@ -506,27 +538,51 @@ export default function RoomClient({ roomId }) {
             </div>
           </div>
         )}
+
+        {/* ⭐ Host: End Meeting Button */}
+        {isHost && (
+          <div className="section" style={{ marginTop: "auto", paddingTop: "20px" }}>
+            <button
+              onClick={endMeetingForAll}
+              style={{
+                width: "100%",
+                padding: "14px",
+                background: "#ef4444",
+                border: "none",
+                borderRadius: "10px",
+                color: "white",
+                fontSize: "14px",
+                fontWeight: "600",
+                cursor: "pointer",
+              }}
+            >
+              🔴 End Meeting for All
+            </button>
+          </div>
+        )}
       </div>
 
+      {/* Video Grid */}
       <main className="video-area">
-        
-      <VideoGrid
-        localStream={localStream}
-        remoteStreams={remoteStreams}
-        participants={participants}
-        localName={username}
-        localId={localSocketId}
-        isHost={isHost}  // ⭐ Add this line!
-      />
-            </main>
+        <VideoGrid
+          localStream={localStream}
+          remoteStreams={remoteStreams}
+          participants={participants}
+          localName={username}
+          localId={localSocketId}
+          isHost={isHost}
+        />
+      </main>
 
+      {/* Controls */}
       <footer className="controls-wrap">
         <Controls
           micOn={micOn}
           camOn={camOn}
           onToggleMic={toggleMic}
           onToggleCamera={toggleCamera}
-          onLeave={leaveCall}
+          onLeave={isHost ? endMeetingForAll : leaveCall}
+          isHost={isHost}
         />
       </footer>
     </div>

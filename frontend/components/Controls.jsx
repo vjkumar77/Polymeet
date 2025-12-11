@@ -9,8 +9,7 @@ export default function Controls({
   onToggleMic,
   onToggleCamera,
   onLeave,
-  onScreenShare,
-  isScreenSharing = false,
+  isHost = false,
 }) {
   return (
     <div className="controls-bar">
@@ -32,37 +31,16 @@ export default function Controls({
         {camOn ? "📹" : "📷"}
       </button>
 
-      {/* Screen Share (optional) */}
-      {onScreenShare && (
-        <button
-          className={`control-btn ${isScreenSharing ? "on" : "more"}`}
-          onClick={onScreenShare}
-          data-tooltip={isScreenSharing ? "Stop sharing" : "Share screen"}
-        >
-          🖥️
-        </button>
-      )}
-
       <div className="controls-divider"></div>
 
-      {/* More Options */}
+      {/* Leave/End Button */}
       <button
-        className="control-btn more"
-        data-tooltip="More options"
-      >
-        ⚙️
-      </button>
-
-      <div className="controls-divider"></div>
-
-      {/* Leave */}
-      <button
-        className="control-btn leave"
+        className={`control-btn leave ${isHost ? "host-leave" : ""}`}
         onClick={onLeave}
-        data-tooltip="Leave meeting"
+        data-tooltip={isHost ? "End meeting for all" : "Leave meeting"}
       >
         <span>📞</span>
-        <span>Leave</span>
+        <span>{isHost ? "End" : "Leave"}</span>
       </button>
     </div>
   );
