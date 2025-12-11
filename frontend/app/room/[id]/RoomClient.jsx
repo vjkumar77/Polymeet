@@ -2,10 +2,10 @@
 "use client";
 import "./room.css";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import VideoGrid from "@/components/VideoGrid";
 import Controls from "@/components/Controls";
-import { initSocket, disconnectSocket } from "@/lib/socket";
+import { initSocket, disconnectSocket, getSocket } from "@/lib/socket";
 
 import {
   initLocalStream,
@@ -22,7 +22,8 @@ export default function RoomClient({ roomId }) {
   const isHostRef = useRef(false);
   const offersRef = useRef({});
   const joinedRef = useRef(false);
-  const joinRequestSentRef = useRef(false); // ⭐ NEW: prevent duplicate join requests
+  const mountedRef = useRef(true);              // ⭐ Track if component is mounted
+  const joinRequestSentRef = useRef(false);     // ⭐ Prevent duplicate joins
 
   const [localSocketId, setLocalSocketId] = useState(null);
   const [localStream, setLocalStream] = useState(null);
@@ -33,64 +34,74 @@ export default function RoomClient({ roomId }) {
   const [isHost, setIsHost] = useState(false);
   const [isAdmitted, setIsAdmitted] = useState(false);
   const [waiting, setWaiting] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState("connecting");
 
-  const [username, setUsername] = useState(null);
+  const [username] = useState(() => `User-${Math.floor(Math.random() * 10000)}`);
 
-  const [micOn, setMicOn] = useState(false);
-  const [camOn, setCamOn] = useState(false);
-
+  const [micOn, setMicOn] = useState(true);
+  const [camOn, setCamOn] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // -----------------------------------------------
-  async function awaitCreateOffer(peerId, socket) {
+  // ⭐ Create offer helper
+  const awaitCreateOffer = useCallback(async (peerId, socket) => {
     try {
       createPeerConnection({
         peerId,
         socket,
-        onRemoteStream: (pid, stream) =>
-          setRemoteStreams((prev) => ({ ...prev, [pid]: stream })),
+        onRemoteStream: (pid, stream) => {
+          if (mountedRef.current) {
+            setRemoteStreams((prev) => ({ ...prev, [pid]: stream }));
+          }
+        },
       });
 
       if (offersRef.current[peerId]) return;
-
       offersRef.current[peerId] = true;
       await createOfferTo({ peerId, socket });
     } catch (e) {
+      console.error("[RTC] createOffer error:", e);
       delete offersRef.current[peerId];
     }
-  }
-  // -----------------------------------------------
-
-  // Generate username once
-  useEffect(() => {
-    setUsername(`User-${Math.floor(Math.random() * 10000)}`);
   }, []);
 
-  // Initialize camera/mic
+  // ⭐ Initialize local stream FIRST
   useEffect(() => {
-    let mounted = true;
-    (async () => {
+    mountedRef.current = true;
+    
+    const initMedia = async () => {
       try {
+        console.log("[MEDIA] Requesting camera/mic...");
         const stream = await initLocalStream();
-        if (!mounted) return;
-
+        
+        if (!mountedRef.current) return;
+        
+        console.log("[MEDIA] ✅ Got local stream");
         setLocalStream(stream);
-        setMicOn(stream.getAudioTracks()[0]?.enabled ?? false);
-        setCamOn(stream.getVideoTracks()[0]?.enabled ?? false);
+        setMicOn(stream.getAudioTracks()[0]?.enabled ?? true);
+        setCamOn(stream.getVideoTracks()[0]?.enabled ?? true);
       } catch (e) {
-        console.error("Failed to get media:", e);
+        console.error("[MEDIA] ❌ Failed to get media:", e);
+        setConnectionStatus("media-error");
       }
-    })();
+    };
+
+    initMedia();
+
     return () => {
-      mounted = false;
+      mountedRef.current = false;
     };
   }, []);
 
-  // ⭐ MAIN SOCKET LOGIC - FIXED
+  // ⭐ SOCKET LOGIC - Only runs when localStream is ready
   useEffect(() => {
-    if (!localStream || !username) return;
+    if (!localStream) {
+      console.log("[SOCKET] Waiting for localStream...");
+      return;
+    }
 
-    // Reset refs for fresh connection
+    console.log("[SOCKET] LocalStream ready, initializing socket...");
+    
+    // Reset state for this room
     joinRequestSentRef.current = false;
     isHostRef.current = false;
     joinedRef.current = false;
@@ -98,87 +109,99 @@ export default function RoomClient({ roomId }) {
     const socket = initSocket();
     socketRef.current = socket;
 
-    // ⭐ Function to send join request
+    // ⭐ Send join request
     const sendJoinRequest = () => {
       if (joinRequestSentRef.current) {
-        console.log("[CLIENT] Join request already sent, skipping");
+        console.log("[SOCKET] Join request already sent, skipping");
         return;
       }
-      
-      console.log("[CLIENT] Sending join-request for room:", roomId, "socket:", socket.id);
+
+      console.log("[SOCKET] 📤 Sending join-request:", { roomId, username, socketId: socket.id });
       joinRequestSentRef.current = true;
-      socket.emit("join-request", { roomId, username });
       setWaiting(true);
+      setConnectionStatus("joining");
+      
+      socket.emit("join-request", { roomId, username });
     };
 
-    // ⭐ CRITICAL: Handle connection event
-    socket.on("connect", () => {
-      console.log("[CLIENT] ✅ Socket connected:", socket.id);
-      setLocalSocketId(socket.id);
-      
-      // ⭐ Send join request ONLY after connected
+    // ⭐ Handle connect
+    const handleConnect = () => {
+      console.log("[SOCKET] ✅ Connected:", socket.id);
+      if (mountedRef.current) {
+        setLocalSocketId(socket.id);
+        setConnectionStatus("connected");
+      }
       sendJoinRequest();
-    });
+    };
 
-    // ⭐ If socket is ALREADY connected (rare but possible)
+    // ⭐ If already connected, send join request immediately
     if (socket.connected) {
-      console.log("[CLIENT] Socket already connected:", socket.id);
+      console.log("[SOCKET] Already connected:", socket.id);
       setLocalSocketId(socket.id);
       sendJoinRequest();
     }
 
-    // Handle reconnection
-    socket.on("reconnect", () => {
-      console.log("[CLIENT] Socket reconnected:", socket.id);
-      joinRequestSentRef.current = false; // Allow re-sending join request
-      sendJoinRequest();
-    });
+    socket.on("connect", handleConnect);
 
     // ⭐ YOU ARE HOST
     socket.on("you-are-host", () => {
-      console.log("[CLIENT] ✅ I am the HOST!");
+      console.log("[SOCKET] 👑 I am the HOST!");
+      if (!mountedRef.current) return;
+      
       setIsHost(true);
       isHostRef.current = true;
       setIsAdmitted(true);
       joinedRef.current = true;
       setWaiting(false);
+      setConnectionStatus("in-room");
     });
 
     // Waiting for host
     socket.on("waiting-for-host", () => {
-      console.log("[CLIENT] Waiting for host to admit...");
+      console.log("[SOCKET] ⏳ Waiting for host to admit...");
+      if (!mountedRef.current) return;
+      
       setWaiting(true);
       setIsAdmitted(false);
+      setConnectionStatus("waiting");
     });
 
-    // Pending requests (for host)
+    // Pending requests (host only)
     socket.on("pending-requests", (list) => {
-      console.log("[CLIENT] Pending requests:", list);
-      setPendingRequests(list || []);
+      console.log("[SOCKET] 📋 Pending requests:", list?.length || 0);
+      if (mountedRef.current) {
+        setPendingRequests(list || []);
+      }
     });
 
-    // ⭐ ADMITTED - Guest is allowed in
+    // ⭐ ADMITTED
     socket.on("admitted", ({ users }) => {
-      console.log("[CLIENT] ✅ Admitted to room! Users:", users);
+      console.log("[SOCKET] ✅ Admitted to room! Users:", users?.length);
+      if (!mountedRef.current) return;
+
       setIsAdmitted(true);
       setWaiting(false);
       joinedRef.current = true;
+      setConnectionStatus("in-room");
 
       const myId = socket.id;
       const others = users.filter((u) => u.id !== myId);
       setParticipants(others);
 
-      // Init PC for all existing users
+      // Create peer connections
       others.forEach((u) => {
         createPeerConnection({
           peerId: u.id,
           socket,
-          onRemoteStream: (pid, stream) =>
-            setRemoteStreams((prev) => ({ ...prev, [pid]: stream })),
+          onRemoteStream: (pid, stream) => {
+            if (mountedRef.current) {
+              setRemoteStreams((prev) => ({ ...prev, [pid]: stream }));
+            }
+          },
         });
       });
 
-      // Host sends offers to all
+      // Host sends offers
       if (isHostRef.current) {
         others.forEach((u) => awaitCreateOffer(u.id, socket));
       }
@@ -186,7 +209,9 @@ export default function RoomClient({ roomId }) {
 
     // Room users update
     socket.on("room-users", (users) => {
-      console.log("[CLIENT] Room users update:", users);
+      console.log("[SOCKET] 👥 Room users:", users?.length);
+      if (!mountedRef.current) return;
+
       const myId = socket.id;
       const others = users.filter((u) => u.id !== myId);
 
@@ -202,15 +227,20 @@ export default function RoomClient({ roomId }) {
         createPeerConnection({
           peerId: u.id,
           socket,
-          onRemoteStream: (pid, stream) =>
-            setRemoteStreams((p) => ({ ...p, [pid]: stream })),
+          onRemoteStream: (pid, stream) => {
+            if (mountedRef.current) {
+              setRemoteStreams((p) => ({ ...p, [pid]: stream }));
+            }
+          },
         })
       );
     });
 
-    // ⭐ USER JOINED
+    // User joined
     socket.on("user-joined", async ({ id, username: newName }) => {
-      console.log("[CLIENT] User joined:", id, newName);
+      console.log("[SOCKET] 🆕 User joined:", id, newName);
+      if (!mountedRef.current) return;
+
       const myId = socket.id;
 
       setParticipants((prev) => {
@@ -221,36 +251,40 @@ export default function RoomClient({ roomId }) {
       createPeerConnection({
         peerId: id,
         socket,
-        onRemoteStream: (pid, stream) =>
-          setRemoteStreams((prev) => ({ ...prev, [pid]: stream })),
+        onRemoteStream: (pid, stream) => {
+          if (mountedRef.current) {
+            setRemoteStreams((prev) => ({ ...prev, [pid]: stream }));
+          }
+        },
       });
 
-      // Host always sends offer to new user
       if (isHostRef.current) {
         await awaitCreateOffer(id, socket);
         return;
       }
 
-      // Guest mesh: guests also send offer to new users
       if (id !== myId && joinedRef.current) {
         await awaitCreateOffer(id, socket);
       }
     });
 
-    // SIGNALING
+    // Signaling
     socket.on("offer", async ({ from, offer }) => {
-      console.log("[CLIENT] Received offer from:", from);
+      console.log("[SOCKET] 📨 Received offer from:", from);
       await handleOfferFrom({
         fromId: from,
         offer,
         socket,
-        onRemoteStream: (pid, stream) =>
-          setRemoteStreams((p) => ({ ...p, [pid]: stream })),
+        onRemoteStream: (pid, stream) => {
+          if (mountedRef.current) {
+            setRemoteStreams((p) => ({ ...p, [pid]: stream }));
+          }
+        },
       });
     });
 
     socket.on("answer", async ({ from, answer }) => {
-      console.log("[CLIENT] Received answer from:", from);
+      console.log("[SOCKET] 📨 Received answer from:", from);
       await handleAnswerFrom({ fromId: from, answer });
       delete offersRef.current[from];
     });
@@ -261,34 +295,36 @@ export default function RoomClient({ roomId }) {
 
     // User left
     socket.on("user-left", (id) => {
-      console.log("[CLIENT] User left:", id);
-      setParticipants((prev) => prev.filter((p) => p.id !== id));
+      console.log("[SOCKET] 👋 User left:", id);
+      if (!mountedRef.current) return;
 
+      setParticipants((prev) => prev.filter((p) => p.id !== id));
       setRemoteStreams((prev) => {
         const c = { ...prev };
         delete c[id];
         return c;
       });
-
       delete offersRef.current[id];
     });
 
-    // Rejected by host
+    // Rejected
     socket.on("rejected", ({ reason }) => {
-      alert("You were rejected by host: " + (reason || ""));
+      alert("Rejected by host: " + (reason || ""));
       window.location.href = "/";
     });
 
-    // Connection error handling
-    socket.on("connect_error", (err) => {
-      console.error("[CLIENT] Connection error:", err.message);
+    // Disconnect
+    socket.on("disconnect", (reason) => {
+      console.log("[SOCKET] ❌ Disconnected:", reason);
+      if (mountedRef.current) {
+        setConnectionStatus("disconnected");
+      }
     });
 
-    // ⭐ CLEANUP on unmount
+    // ⭐ CLEANUP - Don't disconnect socket, just remove listeners
     return () => {
-      console.log("[CLIENT] Cleaning up socket...");
-      socket.off("connect");
-      socket.off("reconnect");
+      console.log("[SOCKET] Cleaning up listeners...");
+      socket.off("connect", handleConnect);
       socket.off("you-are-host");
       socket.off("waiting-for-host");
       socket.off("pending-requests");
@@ -300,35 +336,34 @@ export default function RoomClient({ roomId }) {
       socket.off("ice-candidate");
       socket.off("user-left");
       socket.off("rejected");
-      socket.off("connect_error");
-      closeAllConnections();
+      socket.off("disconnect");
     };
-  }, [localStream, username, roomId]);
+  }, [localStream, username, roomId, awaitCreateOffer]);
 
-  // TOGGLE FUNCTIONS
+  // Toggle functions
   const toggleMic = () => {
-    const t = localStream?.getAudioTracks()[0];
-    if (t) {
-      t.enabled = !t.enabled;
-      setMicOn(t.enabled);
+    const track = localStream?.getAudioTracks()[0];
+    if (track) {
+      track.enabled = !track.enabled;
+      setMicOn(track.enabled);
     }
   };
 
   const toggleCamera = () => {
-    const t = localStream?.getVideoTracks()[0];
-    if (t) {
-      t.enabled = !t.enabled;
-      setCamOn(t.enabled);
+    const track = localStream?.getVideoTracks()[0];
+    if (track) {
+      track.enabled = !track.enabled;
+      setCamOn(track.enabled);
     }
   };
 
   const admitUser = (id) => {
-    console.log("[CLIENT] Admitting user:", id);
+    console.log("[ACTION] Admitting:", id);
     socketRef.current?.emit("admit-user", { roomId, userId: id });
   };
 
   const rejectUser = (id) => {
-    console.log("[CLIENT] Rejecting user:", id);
+    console.log("[ACTION] Rejecting:", id);
     socketRef.current?.emit("reject-user", { roomId, userId: id });
   };
 
@@ -338,15 +373,30 @@ export default function RoomClient({ roomId }) {
     window.location.href = "/";
   };
 
-  // ⭐ WAITING SCREEN - Show only for non-hosts who are waiting
+  // ⭐ LOADING STATE
+  if (!localStream) {
+    return (
+      <div className="waiting-screen">
+        <div className="waiting-card">
+          <h2>🎥 Setting up camera...</h2>
+          <p>Please allow camera and microphone access.</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ⭐ WAITING SCREEN
   if (!isHost && !isAdmitted && waiting) {
     return (
       <div className="waiting-screen">
         <div className="waiting-card">
-          <h2>Waiting for host to admit you…</h2>
-          <p>Please wait.</p>
-          <button 
-            onClick={leaveCall} 
+          <h2>⏳ Waiting for host to admit you…</h2>
+          <p>Please wait. The host will let you in soon.</p>
+          <p style={{ fontSize: "12px", opacity: 0.6, marginTop: "10px" }}>
+            Status: {connectionStatus} | Socket: {localSocketId || "connecting..."}
+          </p>
+          <button
+            onClick={leaveCall}
             style={{
               marginTop: "20px",
               padding: "10px 20px",
@@ -354,7 +404,7 @@ export default function RoomClient({ roomId }) {
               border: "none",
               borderRadius: "8px",
               color: "white",
-              cursor: "pointer"
+              cursor: "pointer",
             }}
           >
             Cancel
@@ -392,12 +442,11 @@ export default function RoomClient({ roomId }) {
         </div>
       </div>
 
-      {/* SIDEBAR */}
+      {/* Sidebar */}
       <div className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <button className="close-sidebar" onClick={() => setSidebarOpen(false)}>
           ✖
         </button>
-
         <h3>People</h3>
 
         <div className="section">
@@ -405,9 +454,8 @@ export default function RoomClient({ roomId }) {
           <div className="list">
             <div className="person">
               <div className="name">{username} (You)</div>
-              {isHost && <div className="small-badge">Host</div>}
+              {isHost && <span className="host-badge">Host</span>}
             </div>
-
             {participants.map((p) => (
               <div className="person" key={p.id}>
                 <div className="name">{p.username}</div>
@@ -420,12 +468,12 @@ export default function RoomClient({ roomId }) {
           <div className="section">
             <div className="section-title">Waiting Room</div>
             <div className="list">
-              {pendingRequests.length === 0 && <div className="muted">No one waiting</div>}
+              {pendingRequests.length === 0 && (
+                <div className="muted">No one waiting</div>
+              )}
               {pendingRequests.map((p) => (
                 <div className="person" key={p.id}>
-                  <div>
-                    <div className="name">{p.username}</div>
-                  </div>
+                  <div className="name">{p.username}</div>
                   <div className="actions">
                     <button className="admit" onClick={() => admitUser(p.id)}>
                       Admit
@@ -441,7 +489,7 @@ export default function RoomClient({ roomId }) {
         )}
       </div>
 
-      {/* VIDEO GRID */}
+      {/* Video Grid */}
       <main className="video-area">
         <VideoGrid
           localStream={localStream}
@@ -452,7 +500,7 @@ export default function RoomClient({ roomId }) {
         />
       </main>
 
-      {/* CONTROLS */}
+      {/* Controls */}
       <footer className="controls-wrap">
         <Controls
           micOn={micOn}
