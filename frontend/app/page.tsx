@@ -6,28 +6,23 @@ import Hero from "@/components/Hero";
 import Features from "@/components/Features";
 import Steps from "@/components/Steps";
 import Footer from "@/components/Footer";
-import "./styles/home.css";  // path MUST be correct
+import "./styles/home.css";
 
 export default function HomePage() {
   const router = useRouter();
   const [joinId, setJoinId] = useState("");
 
-  // Start meeting = Create random ID + push
   const startMeeting = () => {
-    const roomId =
+    const id =
       typeof crypto !== "undefined" && crypto.randomUUID
         ? crypto.randomUUID()
-        : Math.random().toString(36).slice(2, 10);
+        : Math.random().toString(36).substring(2, 10);
 
-    router.push(`/room/${roomId}`);
+    router.push(`/room/${id}`);
   };
 
-  // Join existing meeting
   const joinMeeting = () => {
-    if (!joinId.trim()) {
-      alert("Enter a meeting ID");
-      return;
-    }
+    if (!joinId.trim()) return alert("Enter meeting ID");
     router.push(`/room/${joinId.trim()}`);
   };
 
@@ -48,7 +43,7 @@ export default function HomePage() {
             className="join-input"
           />
           <button className="btn" onClick={joinMeeting}>
-            Join
+            Join Meeting
           </button>
         </div>
       </div>
